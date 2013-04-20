@@ -1,0 +1,137 @@
+#!/usr/bin/env ruby
+
+begin
+  require 'sockhop'
+rescue LoadError
+  prjdir = File.dirname(File.dirname(File.expand_path(__FILE__)))
+  libdir = File.join(prjdir, "lib")
+  $LOAD_PATH.unshift libdir
+  require 'sockhop'
+end
+
+require 'yaml'
+require 'fileutils'
+
+if ARGV.empty?
+  tmpdir = File.join(ENV["TMPDIR"], "sockhop")
+  FileUtils.mkdir_p tmpdir
+  
+  opts = {
+    "logfile"           => nil, # to STDERR
+    "daemonize"         => false,
+    "sub_server_path"   => File.join(tmpdir, "sub-server.sock"),
+    "pub_server_path"   => File.join(tmpdir, "pub-server.sock"),
+    "read_server_path"  => File.join(tmpdir, "read-server.sock"),
+    "sub_server_addr"   => "127.0.0.1:30123",
+    "pub_server_addr"   => "127.0.0.1:30124",
+    "read_server_addr"  => "127.0.0.1:30125",
+    "control_addr"      => File.join(tmpdir, "control.sock"),
+    "max_length"        => 100_000 # just to catch bad data
+  }
+  
+  puts "Starting with default configuration (use -h for help):", opts.to_yaml
+
+elsif ARGV[0] =~ /^-h|--help$/ ###or ARGV.size > 1
+  puts <<-END
+    
+    #{$0}: Start the sockhop server.
+    
+    Usage: #{$0} [file] [-h,--help]
+    
+    Options:
+    
+      -h,-help    This help
+    
+    Arguments:
+    
+    If file is given, read options in YAML format from file.
+    
+    If file is not given, run with default options (and print them to stdout).
+    You may edit these options and save to a file for use as above.
+    
+  END
+  
+  exit
+
+else
+  opts = YAML.load(File.read(ARGV[0]))
+end
+
+case ARGV[1]
+when /\Astop\z/i
+  control_addr = opts["control_addr"]
+  unless control_addr
+    raise "no control_addr given in opts"
+  end
+  
+  s = nil
+  begin # try IP addr
+    addr, port = control_addr.split(":")
+    raise unless port
+    port = Integer(port)
+  rescue # assume path to unix socket
+    FileUtils.rm_f(control_addr)
+    s = UNIXSocket.open(File.expand_path(control_addr))
+  else
+    s = TCPSocket.open(addr, port)
+  end
+
+  s.extend Messageable
+  s.send_message "stop"
+  puts s.recv_message
+  
+  exit
+end
+
+pubsub = PubSub.new opts
+
+def finish pubsub
+  trap "INT" do exit! end
+  trap "TERM" do exit! end
+  pubsub.report
+  exit 
+end
+
+def run pubsub
+  trap "INT" do finish pubsub; end 
+  trap "TERM" do finish pubsub; end 
+
+  begin
+    pubsub.run
+  rescue StandardError => ex
+    pubsub.log.error [ex, ex.backtrace].join("\n  ")
+    pubsub.log.error "Retrying..."
+    sleep 1.0
+    retry
+  end
+end
+
+def daemonize username=nil
+  fork do
+    Process.setsid
+
+    fork do
+      if username
+        require 'etc'
+        user = Etc.getpwnam(username)
+        Process::UID.change_privilege(user.uid)
+      end
+
+      Dir.chdir '/'
+      File.umask 0
+      STDIN.reopen "/dev/null", "r"
+      STDOUT.reopen "/dev/null", "r+"
+      STDERR.reopen STDOUT
+
+      yield
+    end
+  end
+end
+
+if opts["daemonize"]
+  daemonize opts["user"] do
+    run pubsub
+  end
+else
+  run pubsub
+end
