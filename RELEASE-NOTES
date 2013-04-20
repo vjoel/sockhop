@@ -1,0 +1,19 @@
+sockhop 0.9
+
+- test.rb uses socket pair instead of drb
+
+sockhop 0.8
+
+- Fixed some bugs with rel paths
+
+- control socket works.
+
+sockhop 0.7
+
+- Reorganized dir structure.
+
+- Added test, bench, various samples, clients.
+
+sockhop 0.6
+
+- Rewrote Messageable.
